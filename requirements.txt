@@ -1,5 +1,4 @@
 streamlit
-gensim
 scikit-learn
 numpy
 joblib

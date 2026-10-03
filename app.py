@@ -5,7 +5,7 @@ import joblib
 import numpy as np
 import urllib.request
 import html
-from gensim.models import Word2Vec
+# from gensim.models import Word2Vec
 from Sastrawi.StopWordRemover.StopWordRemoverFactory import StopWordRemoverFactory
 
 # Set konfigurasi halaman

@@ -282,6 +282,7 @@ if news_text:
         with col_res2:
             st.subheader("📊 Persentase Probabilitas Target")
             for cls_name, pct in sorted_probs:
+                pct = float(pct)
                 st.write(f"**{cls_name}**: `{pct:.2f}%`")
                 st.progress(min(pct / 100.0, 1.0))
 

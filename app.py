@@ -5,7 +5,7 @@ import joblib
 import numpy as np
 import urllib.request
 import html
-from gensim.models import Word2Vec
+# Inference berbasis dictionary vektor (tanpa kompilasi gensim C/C++)
 from Sastrawi.StopWordRemover.StopWordRemoverFactory import StopWordRemoverFactory
 
 # Set konfigurasi halaman
@@ -72,14 +72,16 @@ st.markdown("""
 @st.cache_resource
 def load_components():
     model_dir = os.path.join(os.path.dirname(__file__), "Output", "models")
-    sg_path = os.path.join(model_dir, "skipgram_model.model")
+    vec_path = os.path.join(model_dir, "skipgram_vectors.pkl")
     nb_path = os.path.join(model_dir, "naive_bayes_model.pkl")
     cls_path = os.path.join(model_dir, "classes.pkl")
 
-    if not os.path.exists(sg_path) or not os.path.exists(nb_path):
+    if not os.path.exists(vec_path) or not os.path.exists(nb_path):
         raise FileNotFoundError(f"File model tidak ditemukan di {model_dir}. Pastikan model telah disimpan.")
 
-    model_sg = Word2Vec.load(sg_path)
+    sg_bundle = joblib.load(vec_path)
+    model_sg_wv = sg_bundle["vectors"]
+    vector_size = sg_bundle.get("vector_size", 100)
     model_nb = joblib.load(nb_path)
     classes = joblib.load(cls_path) if os.path.exists(cls_path) else list(model_nb.classes_)
 
@@ -87,10 +89,10 @@ def load_components():
     factory = StopWordRemoverFactory()
     stopword_set = set(factory.get_stop_words())
 
-    return model_sg, model_nb, classes, stopword_set
+    return model_sg_wv, vector_size, model_nb, classes, stopword_set
 
 try:
-    model_sg, model_nb, classes, stopword_set = load_components()
+    model_sg_wv, vector_size, model_nb, classes, stopword_set = load_components()
     model_loaded = True
 except Exception as e:
     model_loaded = False
@@ -153,8 +155,8 @@ def preprocess_text(text: str, stopwords: set):
     tokens = [w for w in clean.split() if w not in stopwords and len(w) > 1]
     return tokens
 
-def get_mean_vector(tokens, model_sg, dim=100):
-    word_vecs = [model_sg.wv[w] for w in tokens if w in model_sg.wv]
+def get_mean_vector(tokens, word_vectors_dict, dim=100):
+    word_vecs = [word_vectors_dict[w] for w in tokens if w in word_vectors_dict]
     if len(word_vecs) == 0:
         return np.zeros(dim)
     return np.mean(word_vecs, axis=0)
@@ -188,7 +190,7 @@ with st.sidebar:
     - Model: **Gaussian Naive Bayes**
     - Akurasi Model: **97.50%**
     - Kategori Target: **Sport** & **Finance**
-    """.format(len(model_sg.wv)))
+    """.format(len(model_sg_wv)))
     
     st.divider()
     st.caption("Praktek Pembelajaran Web Mining - PPW 2026")
@@ -243,7 +245,7 @@ if news_text:
         st.warning("Teks tidak menghasilkan token kata yang valid setelah pembersihan.")
     else:
         # Mesin 1: Ekstraksi Vektor Dokumen Skip-gram
-        doc_vec = get_mean_vector(tokens, model_sg, dim=100)
+        doc_vec = get_mean_vector(tokens, model_sg_wv, dim=vector_size)
         
         # Mesin 2: Prediksi Naive Bayes
         doc_vec_2d = doc_vec.reshape(1, -1)

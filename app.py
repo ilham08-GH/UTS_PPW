@@ -3,8 +3,7 @@ import os
 import re
 import joblib
 import numpy as np
-import urllib.request
-import html
+import trafilatura
 # Inference berbasis dictionary vektor (tanpa kompilasi gensim C/C++)
 from Sastrawi.StopWordRemover.StopWordRemoverFactory import StopWordRemoverFactory
 
@@ -99,95 +98,25 @@ except Exception as e:
     load_err = str(e)
 
 
-# FUNGSI SCRAPING MURNI (TANPA BEAUTIFULSOUP)
-# Menggunakan urllib.request bawaan Python & Regular Expressions
-
+# EKSTRAKSI ARTIKEL DENGAN TRAFILATURA
 def fetch_news_from_url(url: str):
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
-    req = urllib.request.Request(url, headers=headers)
+    downloaded = trafilatura.fetch_url(url)
+    if not downloaded:
+        raise ValueError("Halaman berita tidak berhasil diambil dari URL.")
 
-    with urllib.request.urlopen(req, timeout=12) as response:
-        raw_html = response.read().decode("utf-8", errors="ignore")
+    metadata = trafilatura.extract_metadata(downloaded)
+    title = metadata.title.strip() if metadata and metadata.title else ""
+    text_content = trafilatura.extract(
+        downloaded,
+        include_comments=False,
+        include_tables=False,
+        favor_precision=True
+    )
 
-    # 1. Ekstraksi Judul: utamakan og:title / originalTitle / H1
-    title = ""
-    for pattern in [
-        r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']',
-        r'<meta[^>]+name=["\']originalTitle["\'][^>]+content=["\']([^"\']+)["\']',
-        r'<h1[^>]*>(.*?)</h1>',
-        r'<title[^>]*>(.*?)</title>'
-    ]:
-        match = re.search(pattern, raw_html, re.IGNORECASE | re.DOTALL)
-        if match:
-            content = match.group(1)
-            title = re.sub(r"<[^>]+>", " ", content)
-            title = html.unescape(title).strip()
-            title = re.sub(r"\s+", " ", title)
-            if title:
-                break
+    if not text_content or len(text_content.strip()) < 30:
+        raise ValueError("Trafilatura tidak menemukan isi artikel yang mencukupi.")
 
-    # 2. Fokus ke container artikel utama Detik agar teks sidebar/promo tidak ikut
-    article_html = raw_html
-    lower_html = raw_html.lower()
-    article_start = lower_html.find('detail__body-text')
-    if article_start != -1:
-        article_start = raw_html.find('<', article_start)
-        article_end = lower_html.find('detail__body-tag', article_start)
-        if article_end == -1:
-            article_end = lower_html.find('<!-- s:engagement bar bottom -->', article_start)
-        if article_end == -1:
-            article_end = len(raw_html)
-        article_html = raw_html[article_start:article_end]
-
-    # 3. Bersihkan script/style/noscript agar tidak ikut terkumpul
-    clean_html = re.sub(r"<(script|style|noscript)[^>]*>.*?</\1>", " ", article_html, flags=re.IGNORECASE | re.DOTALL)
-
-    # 4. Ambil paragraf yang benar-benar isi artikel, bukan promo/sidebar/iklan
-    paragraphs = re.findall(r"<p[^>]*>(.*?)</p>", clean_html, flags=re.IGNORECASE | re.DOTALL)
-    extracted_texts = []
-    ignored_patterns = [
-        r"loading\.\.\.", r"promoted", r"yang sedang ramai dicari", r"home", r"tautan telah disalin",
-        r"liga inggris|liga italia|liga spanyol|liga jerman|uefa|dunia|indeks detiksport",
-        r"advertisement|scroll to continue with content"
-    ]
-
-    for p in paragraphs:
-        text_p = re.sub(r"<[^>]+>", " ", p)
-        text_p = html.unescape(text_p).strip()
-        text_p = re.sub(r"\s+", " ", text_p)
-
-        if len(text_p) <= 35:
-            continue
-        if not any(ch.isalpha() for ch in text_p):
-            continue
-        if re.search(r"|".join(ignored_patterns), text_p, re.IGNORECASE):
-            continue
-
-        extracted_texts.append(text_p)
-
-    text_content = " ".join(extracted_texts)
-
-    # Fallback jika tidak menemukan paragraf dari container utama
-    if len(text_content) < 80:
-        paragraphs = re.findall(r"<p[^>]*>(.*?)</p>", raw_html, flags=re.IGNORECASE | re.DOTALL)
-        extracted_texts = []
-        for p in paragraphs:
-            text_p = re.sub(r"<[^>]+>", " ", p)
-            text_p = html.unescape(text_p).strip()
-            text_p = re.sub(r"\s+", " ", text_p)
-            if len(text_p) > 30 and not re.search(r"loading|promoted|yang sedang ramai dicari|tautan telah disalin|advertisement|scroll to continue", text_p, re.IGNORECASE):
-                extracted_texts.append(text_p)
-        text_content = " ".join(extracted_texts)
-
-    # Final fallback: ambil teks mentah dari HTML terbersih jika tetap kosong
-    if len(text_content) < 50:
-        text_content = re.sub(r"<[^>]+>", " ", clean_html)
-        text_content = html.unescape(text_content).strip()
-        text_content = re.sub(r"\s+", " ", text_content)
-
-    return title, text_content
+    return title, text_content.strip()
 
 def preprocess_text(text: str, stopwords: set):
     # 1. Pembersihan karakter non-alfabet
@@ -223,7 +152,6 @@ with st.sidebar:
     st.markdown("""
     **Mesin 1: Vektorisasi Teks**
     - Dimensi: **100 Fitur**
-    - Window Size: **5**
     - Model: **Skip-gram Word2Vec**
 
     **Mesin 2: Klasifikasi Target**
@@ -326,5 +254,3 @@ if news_text:
                     pct = float(pct)
                     st.write(f"**{cls_name}**: `{pct:.2f}%`")
                     st.progress(min(pct / 100.0, 1.0))
-
-

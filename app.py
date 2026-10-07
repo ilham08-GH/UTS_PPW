@@ -223,6 +223,7 @@ with st.sidebar:
     st.markdown("""
     **Mesin 1: Vektorisasi Teks**
     - Dimensi: **100 Fitur**
+    - Window Size: **5**
     - Model: **Skip-gram Word2Vec**
 
     **Mesin 2: Klasifikasi Target**

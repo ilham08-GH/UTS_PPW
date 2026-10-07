@@ -326,9 +326,4 @@ if news_text:
                     st.write(f"**{cls_name}**: `{pct:.2f}%`")
                     st.progress(min(pct / 100.0, 1.0))
 
-            # Tampilkan detail teks hasil parsing
-            with st.expander("🔍 Lihat Teks Berita yang Diproses & Token Kata"):
-                st.markdown("**Contoh Teks yang Diekstraksi:**")
-                st.write(news_text[:500] + ("..." if len(news_text) > 500 else ""))
-                st.markdown("**15 Token Pertama (Setelah Stopword Removal):**")
-                st.code(", ".join(tokens[:15]))
+

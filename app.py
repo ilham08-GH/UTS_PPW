@@ -3,9 +3,8 @@ import os
 import re
 import joblib
 import numpy as np
-import urllib.request
-import html
-from gensim.models import Word2Vec
+import trafilatura
+# Inference berbasis dictionary vektor (tanpa kompilasi gensim C/C++)
 from Sastrawi.StopWordRemover.StopWordRemoverFactory import StopWordRemoverFactory
 
 # Set konfigurasi halaman
@@ -66,20 +65,22 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# -------------------------------------------------------------
+
 # FUNGSI LOAD MODEL & STOPWORDS (CACHED)
-# -------------------------------------------------------------
+
 @st.cache_resource
 def load_components():
     model_dir = os.path.join(os.path.dirname(__file__), "Output", "models")
-    sg_path = os.path.join(model_dir, "skipgram_model.model")
+    vec_path = os.path.join(model_dir, "skipgram_vectors.pkl")
     nb_path = os.path.join(model_dir, "naive_bayes_model.pkl")
     cls_path = os.path.join(model_dir, "classes.pkl")
 
-    if not os.path.exists(sg_path) or not os.path.exists(nb_path):
+    if not os.path.exists(vec_path) or not os.path.exists(nb_path):
         raise FileNotFoundError(f"File model tidak ditemukan di {model_dir}. Pastikan model telah disimpan.")
 
-    model_sg = Word2Vec.load(sg_path)
+    sg_bundle = joblib.load(vec_path)
+    model_sg_wv = sg_bundle["vectors"]
+    vector_size = sg_bundle.get("vector_size", 100)
     model_nb = joblib.load(nb_path)
     classes = joblib.load(cls_path) if os.path.exists(cls_path) else list(model_nb.classes_)
 
@@ -87,62 +88,35 @@ def load_components():
     factory = StopWordRemoverFactory()
     stopword_set = set(factory.get_stop_words())
 
-    return model_sg, model_nb, classes, stopword_set
+    return model_sg_wv, vector_size, model_nb, classes, stopword_set
 
 try:
-    model_sg, model_nb, classes, stopword_set = load_components()
+    model_sg_wv, vector_size, model_nb, classes, stopword_set = load_components()
     model_loaded = True
 except Exception as e:
     model_loaded = False
     load_err = str(e)
 
-# -------------------------------------------------------------
-# FUNGSI SCRAPING MURNI (TANPA BEAUTIFULSOUP)
-# Menggunakan urllib.request bawaan Python & Regular Expressions
-# -------------------------------------------------------------
+
+# EKSTRAKSI ARTIKEL DENGAN TRAFILATURA
 def fetch_news_from_url(url: str):
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
-    req = urllib.request.Request(url, headers=headers)
-    
-    with urllib.request.urlopen(req, timeout=12) as response:
-        raw_html = response.read().decode("utf-8", errors="ignore")
+    downloaded = trafilatura.fetch_url(url)
+    if not downloaded:
+        raise ValueError("Halaman berita tidak berhasil diambil dari URL.")
 
-    # 1. Ekstraksi Judul
-    title_match = re.search(r"<h1[^>]*>(.*?)</h1>", raw_html, re.IGNORECASE | re.DOTALL)
-    if not title_match:
-        title_match = re.search(r"<title[^>]*>(.*?)</title>", raw_html, re.IGNORECASE | re.DOTALL)
-    
-    title = ""
-    if title_match:
-        title = re.sub(r"<[^>]+>", "", title_match.group(1)).strip()
-        title = html.unescape(title)
+    metadata = trafilatura.extract_metadata(downloaded)
+    title = metadata.title.strip() if metadata and metadata.title else ""
+    text_content = trafilatura.extract(
+        downloaded,
+        include_comments=False,
+        include_tables=False,
+        favor_precision=True
+    )
 
-    # 2. Bersihkan tag <script> dan <style>
-    clean_html = re.sub(r"<(script|style|noscript)[^>]*>.*?</\1>", " ", raw_html, flags=re.IGNORECASE | re.DOTALL)
+    if not text_content or len(text_content.strip()) < 30:
+        raise ValueError("Trafilatura tidak menemukan isi artikel yang mencukupi.")
 
-    # 3. Ekstraksi isi semua tag paragraf <p>...</p>
-    paragraphs = re.findall(r"<p[^>]*>(.*?)</p>", clean_html, flags=re.IGNORECASE | re.DOTALL)
-    extracted_texts = []
-    
-    for p in paragraphs:
-        text_p = re.sub(r"<[^>]+>", " ", p) # Buang tag anak di dalam <p>
-        text_p = html.unescape(text_p).strip()
-        text_p = re.sub(r"\s+", " ", text_p)
-        # Saring hanya teks paragraf bermakna (hindari disclaimer pendek / copyright)
-        if len(text_p) > 25:
-            extracted_texts.append(text_p)
-
-    text_content = " ".join(extracted_texts)
-    
-    # Fallback jika tidak menemukan tag <p> yang cukup
-    if len(text_content) < 50:
-        text_content = re.sub(r"<[^>]+>", " ", clean_html)
-        text_content = html.unescape(text_content).strip()
-        text_content = re.sub(r"\s+", " ", text_content)
-
-    return title, text_content
+    return title, text_content.strip()
 
 def preprocess_text(text: str, stopwords: set):
     # 1. Pembersihan karakter non-alfabet
@@ -153,20 +127,18 @@ def preprocess_text(text: str, stopwords: set):
     tokens = [w for w in clean.split() if w not in stopwords and len(w) > 1]
     return tokens
 
-def get_mean_vector(tokens, model_sg, dim=100):
-    word_vecs = [model_sg.wv[w] for w in tokens if w in model_sg.wv]
+def get_mean_vector(tokens, word_vectors_dict, dim=100):
+    word_vecs = [word_vectors_dict[w] for w in tokens if w in word_vectors_dict]
     if len(word_vecs) == 0:
         return np.zeros(dim)
     return np.mean(word_vecs, axis=0)
 
-# -------------------------------------------------------------
+
 # TAMPILAN HEADER UTAMA
-# -------------------------------------------------------------
-st.markdown('<div class="main-title">📰 Klasifikasi Teks Berita Daring</div>', unsafe_allow_html=True)
+
+st.markdown('<div class="main-title"> Klasifikasi Teks Berita </div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="sub-title">Prediksi kategori artikel berita (<b>Sport</b> atau <b>Finance</b>) '
-    'menggunakan 2 mesin: <span class="engine-badge badge-sg">Mesin 1: Skip-gram Embedding</span> '
-    '<span class="engine-badge badge-nb">Mesin 2: Gaussian Naive Bayes</span></div>',
+    '<div class="sub-title">Prediksi kategori artikel berita (<b>Sport</b> atau <b>Finance</b>) ',
     unsafe_allow_html=True
 )
 
@@ -176,45 +148,30 @@ if not model_loaded:
 
 # Sidebar: Info Model
 with st.sidebar:
-    st.header("⚙️ Informasi 2 Mesin")
+    st.header("⚙️ Informasi Singkat")
     st.markdown("""
     **Mesin 1: Vektorisasi Teks**
-    - Arsitektur: **Word2Vec Skip-gram (`sg=1`)**
     - Dimensi: **100 Fitur**
-    - Pooling: **Mean Word Vector**
-    - Kosakata Model: `{}` kata unik
-    
+    - Model: **Skip-gram Word2Vec**
+
     **Mesin 2: Klasifikasi Target**
     - Model: **Gaussian Naive Bayes**
     - Akurasi Model: **97.50%**
     - Kategori Target: **Sport** & **Finance**
-    """.format(len(model_sg.wv)))
+    """.format(len(model_sg_wv)))
     
     st.divider()
-    st.caption("Praktek Pembelajaran Web Mining - PPW 2026")
+    st.caption("PPW 2026")
 
-# -------------------------------------------------------------
-# INPUT FORM: LINK BERITA / TEKS MANUAL
-# -------------------------------------------------------------
-input_tab1, input_tab2 = st.tabs(["🔗 Prediksi dari Link Berita (URL)", "✍️ Masukkan Teks Manual"])
 
-with input_tab1:
-    st.write("Copy dan paste link berita (misalnya Detik Sport / Detik Finance):")
-    url_input = st.text_input(
-        "URL Berita:",
-        placeholder="https://sport.detik.com/... atau https://finance.detik.com/...",
-        key="news_url"
-    )
-    btn_predict_url = st.button("🚀 Ambil Berita & Prediksi Target", type="primary", key="btn_url")
-
-with input_tab2:
-    manual_text = st.text_area(
-        "Ketik / Tempel Isi Berita Langsung:",
-        placeholder="Tempel teks artikel berita di sini...",
-        height=180,
-        key="manual_news_text"
-    )
-    btn_predict_manual = st.button("🚀 Prediksi Teks", type="primary", key="btn_manual")
+# INPUT FORM: LINK BERITA
+st.write("Copy dan paste link berita (misalnya Detik Sport / Detik Finance atau berita yang lain):")
+url_input = st.text_input(
+    "URL Berita:",
+    placeholder="https://sport.detik.com/... atau https://finance.detik.com/...",
+    key="news_url"
+)
+btn_predict_url = st.button("Ambil Berita & Prediksi Berita", type="primary", key="btn_url")
 
 news_title = ""
 news_text = ""
@@ -225,70 +182,89 @@ if btn_predict_url and url_input.strip():
         try:
             news_title, news_text = fetch_news_from_url(url_input.strip())
             if not news_text or len(news_text) < 30:
-                st.warning("Gagal menemukan teks artikel yang mencukupi dari link tersebut. Silakan coba link lain atau gunakan tab input manual.")
+                st.warning("Gagal menemukan teks artikel yang mencukupi dari link tersebut. Silakan coba link berita lain.")
         except Exception as err:
             st.error(f"Gagal mengambil artikel dari link: {err}")
 
-elif btn_predict_manual and manual_text.strip():
-    news_title = "Input Teks Manual"
-    news_text = manual_text.strip()
 
-# -------------------------------------------------------------
 # PROSES PREDIKSI & VISUALISASI PERSENTASE
-# -------------------------------------------------------------
+
 if news_text:
     tokens = preprocess_text(news_text, stopword_set)
-    
+
     if len(tokens) == 0:
         st.warning("Teks tidak menghasilkan token kata yang valid setelah pembersihan.")
     else:
-        # Mesin 1: Ekstraksi Vektor Dokumen Skip-gram
-        doc_vec = get_mean_vector(tokens, model_sg, dim=100)
-        
-        # Mesin 2: Prediksi Naive Bayes
-        doc_vec_2d = doc_vec.reshape(1, -1)
-        pred_label = model_nb.predict(doc_vec_2d)[0]
-        pred_proba = model_nb.predict_proba(doc_vec_2d)[0]
-        
-        # Hitung Persentase Probabilitas
-        prob_dict = {cls: prob * 100 for cls, prob in zip(classes, pred_proba)}
-        sorted_probs = sorted(prob_dict.items(), key=lambda x: x[1], reverse=True)
-        
-        st.divider()
-        
-        # Tampilan Hasil Prediksi Target
-        col_res1, col_res2 = st.columns([1.2, 1])
-        
-        with col_res1:
-            st.subheader("🎯 Hasil Prediksi Target")
-            
-            badge_class = "status-sport" if pred_label.lower() == "sport" else "status-finance"
-            icon = "🏸" if pred_label.lower() == "sport" else "📈"
-            
-            st.markdown(
-                f'<div class="{badge_class}">{icon} {pred_label.upper()}</div>',
-                unsafe_allow_html=True
+        in_vocab_tokens = [t for t in tokens if t in model_sg_wv]
+        if len(in_vocab_tokens) < 3:
+            st.warning(
+                "Kata-kata berita tidak cukup cocok dengan kosakata model yang dilatih. "
+                "Ini sering menyebabkan prediksi mengarah ke kelas dominan (misalnya Finance) karena vektor dokumen menjadi terlalu lemah. "
+                f"Token cocok model: {len(in_vocab_tokens)}/{len(tokens)}."
             )
-            
-            st.markdown(f"**Tingkat Keyakinan:** `{prob_dict[pred_label]:.2f}%`")
-            
             if news_title:
-                st.markdown(f"**Judul Artikel:** *{news_title}*")
-            
-            st.caption(f"Jumlah token kata yang dihitung: {len(tokens)} token | Vektor: {doc_vec.shape[0]} dimensi")
+                title_tokens = preprocess_text(news_title, stopword_set)
+                title_in_vocab = [t for t in title_tokens if t in model_sg_wv]
+                if len(title_in_vocab) >= 3:
+                    st.info("Fallback ke judul artikel karena teks isi terlalu sedikit cocok dengan kosakata model.")
+                    tokens = title_tokens
+                    in_vocab_tokens = title_in_vocab
 
-        with col_res2:
-            st.subheader("📊 Persentase Probabilitas Target")
-            for cls_name, pct in sorted_probs:
-                st.write(f"**{cls_name}**: `{pct:.2f}%`")
-                st.progress(min(pct / 100.0, 1.0))
+        if len(in_vocab_tokens) == 0:
+            st.error("Tidak ada token yang cocok dengan kosakata model. Prediksi tidak dapat dilakukan secara valid.")
+        else:
+            # Mesin 1: Ekstraksi Vektor Dokumen Skip-gram
+            doc_vec = get_mean_vector(tokens, model_sg_wv, dim=vector_size)
 
-        # Tampilkan detail teks hasil parsing
-        with st.expander("🔍 Lihat Seluruh Isi Berita yang Telah Diambil & Detail Token", expanded=False):
-            if news_title:
-                st.markdown(f"### 📰 Judul Berita:\n**{news_title}**")
-            st.markdown("### 📄 Seluruh Teks Konten Berita:")
-            st.text_area("Konten Berita Lengkap:", value=news_text, height=260, disabled=True)
-            st.markdown("### 🔤 Token Kata Setelah Preprocessing (Stopword Removal):")
-            st.write(f"Total token bersih: **{len(tokens)}** kata")
-            st.code(", ".join(tokens))
+            # Mesin 2: Prediksi Naive Bayes
+            doc_vec_2d = doc_vec.reshape(1, -1)
+            pred_label = model_nb.predict(doc_vec_2d)[0]
+            pred_proba = model_nb.predict_proba(doc_vec_2d)[0]
+
+            # Hitung Persentase Probabilitas
+            prob_dict = {cls: float(prob) * 100 for cls, prob in zip(classes, pred_proba)}
+            sorted_probs = sorted(prob_dict.items(), key=lambda x: x[1], reverse=True)
+
+            st.divider()
+
+            # Tampilan Hasil Prediksi Target
+            col_res1, col_res2 = st.columns([1.2, 1])
+
+            with col_res1:
+                st.subheader("Hasil Prediksi Target")
+
+                badge_class = "status-sport" if pred_label.lower() == "sport" else "status-finance"
+                icon = "🏸" if pred_label.lower() == "sport" else "📈"
+
+                st.markdown(
+                    f'<div class="{badge_class}">{icon} {pred_label.upper()}</div>',
+                    unsafe_allow_html=True
+                )
+
+                st.markdown(f"**Tingkat Keyakinan:** `{prob_dict[pred_label]:.2f}%`")
+
+                if news_title:
+                    st.markdown(f"**Judul Artikel:** *{news_title}*")
+
+                st.caption(f"Jumlah token kata yang dihitung: {len(tokens)} token | Vektor: {doc_vec.shape[0]} dimensi")
+
+            with col_res2:
+                st.subheader("📊 Persentase Probabilitas Target")
+                for cls_name, pct in sorted_probs:
+                    pct = float(pct)
+                    st.write(f"**{cls_name}**: `{pct:.2f}%`")
+                    st.progress(min(pct / 100.0, 1.0))
+
+            # Fitur Detail: Lihat Semua Isi Berita & Token Kata
+            st.divider()
+            with st.expander("🔍 Lihat Seluruh Isi Berita yang Telah Diambil & Detail Token", expanded=False):
+                if news_title:
+                    st.markdown(f"### 📰 Judul Berita:\n**{news_title}**")
+                
+                st.markdown("### 📄 Seluruh Teks Konten Berita:")
+                st.text_area("Konten Berita Lengkap:", value=news_text, height=260, disabled=True)
+                
+                st.markdown("### 🔤 Token Kata Hasil Preprocessing (Stopword Removal):")
+                st.write(f"Total token bersih: **{len(tokens)}** kata | Token cocok dengan model Skip-gram: **{len(in_vocab_tokens)}** kata")
+                st.code(", ".join(tokens))
+

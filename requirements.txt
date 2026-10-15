@@ -4,3 +4,4 @@ numpy
 joblib
 sastrawi
 trafilatura
+gensim
